@@ -7,4 +7,5 @@ import (
 func main() {
 	log.Println("Starting main...")
 	ChainCommand()
+	LittleServer()
 }
