@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"fmt"
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
@@ -24,22 +25,31 @@ func NewFaucet(client *ethclient.Client, faucetKey *ecdsa.PrivateKey) *Faucet {
 }
 
 func (f *Faucet) requestFunds(ctx context.Context, receiverAddress common.Address, amount uint64) (*types.Transaction, error) {
-	faucetAddress := ethcrypto.PubkeyToAddress(f.privateKey.PublicKey)
-	nonce, err := f.ethClient.PendingNonceAt(ctx, faucetAddress)
+	nonce, err := f.ethClient.PendingNonceAt(ctx, f.Address())
 	if err != nil {
 		return nil, fmt.Errorf("failed to get nonce: %w", err)
 	}
 
-	gasLimit := uint64(21000)
-	//tip, err := f.ethClient.SuggestGasTipCap(ctx)
-	//if err != nil {
-	//	return nil, fmt.Errorf("failed to suggest gas tip cap: %w", err)
-	//}
+	gasLimit, err := f.ethClient.EstimateGas(ctx, ethereum.CallMsg{
+		From:  receiverAddress, // Your sender address
+		To:    &receiverAddress,
+		Value: new(big.Int).SetUint64(amount),
+		Data:  nil,
+	})
 
-	//gasFeePerGas, err := f.ethClient.SuggestGasPrice(ctx)
-	//if err != nil {
-	//	return nil, fmt.Errorf("failed to suggest gas price: %w", err)
-	//}
+	if err != nil {
+		return nil, fmt.Errorf("failed to estimate gas: %w", err)
+	}
+
+	gasLimit = gasLimit * 120 / 100
+
+	// Get the suggested gas price
+	gasFeePerGas, err := f.ethClient.SuggestGasPrice(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to suggest gas price: %w", err)
+	}
+	tip := new(big.Int).Div(gasFeePerGas, big.NewInt(2))
+	gasFeeCap := new(big.Int).Mul(gasFeePerGas, big.NewInt(2))
 
 	chainId, err := f.ethClient.ChainID(ctx)
 	if err != nil {
@@ -48,17 +58,17 @@ func (f *Faucet) requestFunds(ctx context.Context, receiverAddress common.Addres
 		fmt.Println("chain id:", chainId)
 	}
 
-	gasPrice := big.NewInt(20000000000)
-	tx := types.NewTx(&types.LegacyTx{
-		Nonce:    nonce,
-		GasPrice: gasPrice,
-		Gas:      gasLimit,
-		To:       &receiverAddress,
-		Value:    new(big.Int).SetUint64(amount),
-		Data:     nil,
+	tx := types.NewTx(&types.DynamicFeeTx{
+		Nonce:     nonce,
+		GasTipCap: tip,
+		GasFeeCap: gasFeeCap,
+		Gas:       gasLimit,
+		To:        &receiverAddress,
+		Value:     new(big.Int).SetUint64(amount),
+		Data:      nil,
 	})
 
-	signedTx, err := types.SignTx(tx, types.NewEIP2930Signer(chainId), f.privateKey)
+	signedTx, err := types.SignTx(tx, types.NewLondonSigner(chainId), f.privateKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign transaction: %w", err)
 	}
@@ -68,4 +78,8 @@ func (f *Faucet) requestFunds(ctx context.Context, receiverAddress common.Addres
 		return nil, fmt.Errorf("failed to send transaction: %w", err)
 	}
 	return tx, nil
+}
+
+func (f *Faucet) Address() common.Address {
+	return ethcrypto.PubkeyToAddress(f.privateKey.PublicKey)
 }

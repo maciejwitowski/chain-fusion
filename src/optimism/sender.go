@@ -2,11 +2,8 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/params"
@@ -38,7 +35,7 @@ func main() {
 		log.Fatal("error connecting to L2 RPC:", err)
 	}
 
-	privateKey, err := ethcrypto.LoadECDSA(filepath.Join(keysFolderName, pkAFilename))
+	privateKeyA, err := ethcrypto.LoadECDSA(filepath.Join(keysFolderName, pkAFilename))
 	if err != nil {
 		log.Fatal("error reading priv key: ", err)
 	}
@@ -50,7 +47,8 @@ func main() {
 
 	fmt.Println("Fetching balance BEFORE")
 
-	balance, err := client.BalanceAt(context.Background(), ethcrypto.PubkeyToAddress(privateKey.PublicKey), nil)
+	addressA := ethcrypto.PubkeyToAddress(privateKeyA.PublicKey)
+	balance, err := client.BalanceAt(context.Background(), addressA, nil)
 	if err != nil {
 		log.Fatal("error getting balance: ", err)
 	} else {
@@ -65,7 +63,14 @@ func main() {
 	}
 
 	faucet := NewFaucet(client, faucetKey)
-	tx, err := faucet.requestFunds(context.Background(), ethcrypto.PubkeyToAddress(privateKey.PublicKey), params.Ether)
+
+	nonce, err := client.NonceAt(context.Background(), faucet.Address(), nil)
+	if err != nil {
+		return
+	}
+	fmt.Println("Nonce: ", nonce)
+
+	tx, err := faucet.requestFunds(context.Background(), ethcrypto.PubkeyToAddress(privateKeyA.PublicKey), params.Ether)
 	if err != nil {
 		log.Fatal("error getting funds from faucet: ", err)
 	} else {
@@ -76,18 +81,20 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		receipt, err := waitForReceipt(client, tx.Hash())
+		err := waitForFunds(context.Background(), client, faucet.Address(), nonce)
 		if err != nil {
-			fmt.Println("error fetching receipt: ", err)
+			fmt.Println("Error while waiting for tx", err)
+			return
+		} else {
+			fmt.Println("Transaction done.")
 			return
 		}
-		log.Printf("Transaction mined in block: %d", receipt.BlockNumber.Uint64())
 	}()
 	wg.Wait()
 
 	fmt.Println("Fetching balance AFTER")
 
-	balance, err = client.BalanceAt(context.Background(), ethcrypto.PubkeyToAddress(privateKey.PublicKey), nil)
+	balance, err = client.BalanceAt(context.Background(), ethcrypto.PubkeyToAddress(privateKeyA.PublicKey), nil)
 	if err != nil {
 		log.Fatal("error getting balance: ", err)
 	} else {
@@ -156,32 +163,18 @@ func KeysFolder() (string, error) {
 	return filepath.Join(currentDir, keysFolderName), nil
 }
 
-func waitForReceipt(client *ethclient.Client, txHash common.Hash) (*types.Receipt, error) {
-	ctx := context.Background()
+func waitForFunds(ctx context.Context, client *ethclient.Client, senderAddress common.Address, prevNonce uint64) error {
 	for {
-		fmt.Println("fetching receipt")
-		receipt, err := client.TransactionReceipt(ctx, txHash)
-		if err == nil {
-			return receipt, nil
-		}
-		if !errors.Is(err, ethereum.NotFound) {
-			return nil, err
-		}
-
-		latestBlock, err := client.BlockByNumber(context.Background(), nil)
+		fmt.Println("Waiting for tx...")
+		nonceNow, err := client.NonceAt(ctx, senderAddress, nil)
 		if err != nil {
-			log.Fatalf("Error getting latest block: %v", err)
-		}
-		latestBlockNumber := latestBlock.Number()
-
-		block, err := client.BlockByNumber(context.Background(), latestBlockNumber)
-		if err != nil {
-			log.Fatalf("Error getting block: %v", err)
+			return nil
 		}
 
-		transactions := block.Transactions()
-		fmt.Println("Number of tx:", len(transactions))
-
-		time.Sleep(time.Second) // Wait for 1 second before checking again
+		fmt.Printf("Nonce before: %d, after: %d\n", prevNonce, nonceNow)
+		if nonceNow != prevNonce {
+			return nil
+		}
+		time.Sleep(time.Second)
 	}
 }
